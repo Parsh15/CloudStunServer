@@ -41,10 +41,12 @@ func main() {
 	if len(token) < 24 {
 		log.Fatal("CLOUD_TOKEN is required and must be at least 24 characters")
 	}
-	addr := os.Getenv("CLOUD_ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:8080"
-	}
+	 port := os.Getenv("PORT")
+     if port == "" {
+    port = "8080"
+      }
+
+     addr := "0.0.0.0:" + port
 	s := &Server{workers: map[string]Worker{}, token: token}
 	m := http.NewServeMux()
 	m.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
