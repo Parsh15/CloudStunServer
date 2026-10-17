@@ -20,6 +20,10 @@ type AgentInfo struct {
 var (
 	agentsLock sync.RWMutex
 	agents     = make(map[string]*AgentInfo)
+
+	// Holds punch targets for agents: agentID -> userPublicAddr
+	punchLock    sync.Mutex
+	punchTargets = make(map[string]string)
 )
 
 func main() {
@@ -28,7 +32,6 @@ func main() {
 		port = "10000"
 	}
 
-	// Health check
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		agentsLock.RLock()
 		defer agentsLock.RUnlock()
@@ -39,7 +42,7 @@ func main() {
 		})
 	})
 
-	// Agent registers its public IP:Port + Metrics via HTTP POST
+	// Agent registers and polls for any pending user punch targets
 	http.HandleFunc("/api/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -56,21 +59,37 @@ func main() {
 		agents[a.ID] = &a
 		agentsLock.Unlock()
 
-		log.Printf("Agent registered: %s at %s (CPU: %.1f%%, RAM: %.1fMB)", a.ID, a.PublicAddr, a.CPUUsage, a.RAMUsage)
-		w.WriteHeader(http.StatusOK)
+		// Check if a user requested to connect to this agent
+		punchLock.Lock()
+		targetUser, hasTarget := punchTargets[a.ID]
+		if hasTarget {
+			delete(punchTargets, a.ID) // Consume target
+		}
+		punchLock.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":      "ok",
+			"target_user": targetUser, // Tells agent to punch toward user
+		})
 	})
 
-	// User requests the least-loaded agent via HTTP GET
+	// User requests the best agent AND provides its own public UDP address
 	http.HandleFunc("/api/best-agent", func(w http.ResponseWriter, r *http.Request) {
+		userAddr := r.URL.Query().Get("user_addr")
+		if userAddr == "" {
+			http.Error(w, `{"error":"user_addr parameter is required"}`, http.StatusBadRequest)
+			return
+		}
+
 		agentsLock.RLock()
 		defer agentsLock.RUnlock()
 
 		var best *AgentInfo
-		minScore := 99999.0
+		minScore := 999999.0
 		now := time.Now()
 
 		for _, a := range agents {
-			// Ignore agents inactive for > 90 seconds
 			if now.Sub(a.LastSeen) > 90*time.Second {
 				continue
 			}
@@ -81,14 +100,20 @@ func main() {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
 		if best == nil {
 			http.Error(w, `{"error":"No agents available"}`, http.StatusNotFound)
 			return
 		}
+
+		// Save the user's public address for the agent to punch back
+		punchLock.Lock()
+		punchTargets[best.ID] = userAddr
+		punchLock.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(best)
 	})
 
-	log.Printf("Signaling server running on port %s", port)
+	log.Printf("Signaling server listening on port %s", port)
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, nil))
 }
